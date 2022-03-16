@@ -19,7 +19,10 @@ export class AppComponent {
       const buffer = new Uint8Array(fileBuffer);
       zip.addFile(file.name, buffer)
     }
-    const blob = new Blob([zip.compressToBuffer()]);
-    FileSaver.saveAs(blob, 'zip.zip');
+    zip.getZipFileAsync().then(content => {
+      if(!!content){
+        FileSaver.saveAs(content, 'zip.zip');
+      }
+    })
   }
 }

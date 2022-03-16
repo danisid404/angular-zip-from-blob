@@ -53,79 +53,102 @@ export class ZipService {
       },
 
       /**
-       * Returns the zip file
-       *
-       * @return Buffer
+       * Returns the zip file async-ly
        */
-      compressToBuffer: function () {
-        self.sortEntries(entryList);
+      getZipFileAsync(callback?: any) {
+        return new Promise<any>((resolve, reject) => {
+          if (!entryList.length) {
+            return resolve(null);
+          }
 
-        const dataBlock = [];
-        const entryHeaders = [];
-        let totalSize = 0;
-        let dindex = 0;
+          self.sortEntries(entryList);
 
-        mainHeader.size = 0;
-        mainHeader.offset = 0;
+          const dataBlock = [];
+          const entryHeaders = [];
+          let totalSize = 0;
+          let dindex = 0;
 
-        let outBuffer = Buffer.alloc(0);
+          mainHeader.size = 0;
+          mainHeader.offset = 0;
 
-        for (const entry of entryList) {
-          // compress data and set local and entry header accordingly. Reason why is called first
-          console.log(entry);
-          const compressedData = entry.getEntryBuffer();
-          // 1. construct data header
-          entry.header.offset = dindex;
-          const dataHeader = entry.header.dataHeaderToBinary();
-          const entryNameLen = entry.rawEntryName.length;
-          // 1.2. postheader - data after data header
-          const postHeader = Buffer.alloc(entryNameLen + entry.extra.length);
-          entry.rawEntryName.copy(postHeader, 0);
-          postHeader.copy(entry.extra, entryNameLen);
+          let totalProgress = 0;
+          let loopProgress = 0;
 
-          // 2. offsets
-          const dataLength = dataHeader.length + postHeader.length + compressedData?.length;
-          dindex += dataLength;
+          for (let i = 0; i < entryList.length; i++) {
+            // compress data and set local and entry header accordingly. Reason why is called first
+            const entryBuffer = entryList[i].getEntryBuffer();
+            // 1. construct data header
+            entryList[i].header.offset = dindex;
+            const dataHeader = entryList[i].header.dataHeaderToBinary();
+            const entryNameLen = entryList[i].rawEntryName.length;
+            // 1.2. postheader - data after data header
+            const postHeader = Buffer.alloc(entryNameLen + entryList[i].extra.length);
+            entryList[i].rawEntryName.copy(postHeader, 0);
+            postHeader.copy(entryList[i].extra, entryNameLen);
 
-          // 3. store values in sequence
-          dataBlock.push(dataHeader);
-          dataBlock.push(postHeader);
-          dataBlock.push(compressedData);
+            // 2. offsets
+            const dataLength = dataHeader.length + postHeader.length + entryBuffer.length;
+            dindex += dataLength;
 
-          // 4. construct entry header
-          const entryHeader = entry.packHeader();
-          entryHeaders.push(entryHeader);
-          // 5. update main header
-          mainHeader.size += entryHeader.length;
-          totalSize += dataLength + entryHeader.length;
-          outBuffer = Buffer.concat([outBuffer, Buffer.alloc(dataLength + entryHeader.length)])
-        }
+            // 3. store values in sequence
+            dataBlock.push(dataHeader);
+            dataBlock.push(postHeader);
+            dataBlock.push(entryBuffer);
 
-        // totalSize += mainHeader.mainHeaderSize; // also includes zip file comment length
-        // point to end of data and beginning of central directory first record
-        mainHeader.offset = dindex;
+            // 4. construct entry header
+            const entryHeader = entryList[i].packHeader();
+            entryHeaders.push(entryHeader);
+            // 5. update main header
+            mainHeader.size += entryHeader.length;
+            totalSize += dataLength + entryHeader.length;
 
-        dindex = 0;
-        // const outBuffer = Buffer.alloc(totalSize);
-        outBuffer = Buffer.concat([outBuffer, Buffer.alloc(totalSize)])
-        // write data blocks
-        for (const content of dataBlock) {
-          content.copy(outBuffer, dindex);
-          dindex += content.length;
-        }
+            loopProgress = Math.round((((i + 1) / entryList.length) / 3) * 100);
+            if (!!callback) {
+              callback(totalProgress + loopProgress);
+            }
+          }
 
-        // write central directory entries
-        for (const content of entryHeaders) {
-          content.copy(outBuffer, dindex);
-          dindex += content.length;
-        }
+          totalProgress += loopProgress
+          loopProgress = 0;
+          totalSize += mainHeader.mainHeaderSize; // also includes zip file comment length
+          // point to end of data and beginning of central directory first record
+          mainHeader.offset = dindex;
 
-        // write main header
-        const mh = mainHeader.toBinary();
-        mh.copy(outBuffer, dindex);
+          dindex = 0;
+          const outBuffer = Buffer.alloc(totalSize);
+          // write data blocks
+          for (let i = 0; i < dataBlock.length; i++) {
+            dataBlock[i].copy(outBuffer, dindex);
+            dindex += dataBlock[i].length;
 
-        return outBuffer;
-      },
+            loopProgress = Math.round((((i + 1) / dataBlock.length) / 3) * 100);
+            if (!!callback) {
+              callback(totalProgress + loopProgress);
+            }
+          }
+          totalProgress += loopProgress
+          loopProgress = 0;
+          // write central directory entries
+          for (let i = 0; i < entryHeaders.length; i++) {
+            entryHeaders[i].copy(outBuffer, dindex);
+            dindex += entryHeaders[i].length;
+
+            loopProgress = Math.round((((i + 1) / entryHeaders.length) / 3) * 100);
+            if (!!callback) {
+              callback(totalProgress + loopProgress);
+            }
+          }
+
+          // write main header
+          const mh = mainHeader.toBinary();
+          mh.copy(outBuffer, dindex);
+
+          if (!!callback) {
+            callback(100);
+          }
+          return resolve(new Blob([outBuffer]));
+        })
+      }
     };
   };
 
