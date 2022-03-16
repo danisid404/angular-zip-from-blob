@@ -60,7 +60,7 @@ export class ZipService {
           if (!entryList.length) {
             return resolve(null);
           }
-
+          console.log(entryList);
           self.sortEntries(entryList);
 
           const dataBlock = [];
@@ -76,7 +76,7 @@ export class ZipService {
 
           for (let i = 0; i < entryList.length; i++) {
             // compress data and set local and entry header accordingly. Reason why is called first
-            const entryBuffer = entryList[i].getEntryBuffer();
+            const entryBuffer = entryList[i].entryBuffer;
             // 1. construct data header
             entryList[i].header.offset = dindex;
             const dataHeader = entryList[i].header.dataHeaderToBinary();
@@ -89,6 +89,13 @@ export class ZipService {
             // 2. offsets
             const dataLength = dataHeader.length + postHeader.length + entryBuffer.length;
             dindex += dataLength;
+
+            console.log(dataHeader);
+            console.log(postHeader);
+            console.log(entryBuffer);
+            console.log(dataLength);
+            console.log(dindex);
+            console.log('----')
 
             // 3. store values in sequence
             dataBlock.push(dataHeader);
@@ -159,6 +166,7 @@ export class ZipService {
     let _comment = Buffer.alloc(0);
     let _isDirectory = false;
     let uncompressedData: any = null;
+    let entryBuffer: any = null;
     let _extra = Buffer.alloc(0);
 
     function readUInt64LE(buffer: any, offset: any) {
@@ -255,11 +263,8 @@ export class ZipService {
         return _isDirectory;
       },
 
-      getEntryBuffer: function () {
-        const buffer = Buffer.alloc(uncompressedData.length);
-        _entryHeader.compressedSize = _entryHeader.size;
-        uncompressedData.copy(buffer);
-        return buffer;
+      get entryBuffer() {
+        return entryBuffer;
       },
 
       setData: function (value: any) {
@@ -268,6 +273,9 @@ export class ZipService {
         _entryHeader.method = Constants.STORED;
         _entryHeader.crc = Utils.crc32(value);
         _entryHeader.changed = true;
+        entryBuffer = Buffer.alloc(uncompressedData.length);
+        _entryHeader.compressedSize = _entryHeader.size;
+        uncompressedData.copy(entryBuffer);
       },
 
       getData: function (pass: any) {
