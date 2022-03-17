@@ -2,6 +2,15 @@ import { Injectable } from '@angular/core';
 import { Constants } from './constants';
 import { Utils } from './utils';
 import { Buffer } from 'buffer';
+import { of, Subject } from 'rxjs';
+
+const splitThreshold = 1800000000;
+
+interface IEntryGroup {
+  size: number;
+  entries: any[];
+  progress: number;
+}
 
 @Injectable({
   providedIn: 'root'
@@ -14,23 +23,109 @@ export class ZipService {
     return entryList.sort((a, b) => a.entryName.toLowerCase().localeCompare(b.entryName.toLowerCase()));
   }
 
+  private makeZip(group: IEntryGroup, mainHeader: any, progress$: Subject<number>, file$: Subject<any>) {
+    const entryList = group.entries;
+    this.sortEntries(entryList);
+
+    const dataBlock = [];
+    const entryHeaders = [];
+    let totalSize = 0;
+    let dindex = 0;
+
+    mainHeader.size = 0;
+    mainHeader.offset = 0;
+
+    let totalProgress = 0;
+    let loopProgress = 0;
+
+    for (let i = 0; i < entryList.length; i++) {
+      // compress data and set local and entry header accordingly. Reason why is called first
+      // const entryBuffer = entryList[i].entryBuffer;
+      let entryBuffer = entryList[i].getEntryBuffer();
+      entryList[i].clearEntryBuffer(); // clear buffer is essential else browser will get out of memory if many files are added;
+      // 1. construct data header
+      entryList[i].header.offset = dindex;
+      let dataHeader = entryList[i].header.dataHeaderToBinary();
+      const entryNameLen = entryList[i].rawEntryName.length;
+      // 1.2. postheader - data after data header
+      let postHeader: any = Buffer.alloc(entryNameLen + entryList[i].extra.length);
+      entryList[i].rawEntryName.copy(postHeader, 0);
+      postHeader.copy(entryList[i].extra, entryNameLen);
+
+      // 2. offsets
+      const dataLength = dataHeader.length + postHeader.length + entryBuffer.length;
+      dindex += dataLength;
+
+      // 3. store values in sequence
+      dataBlock.push(dataHeader);
+      dataBlock.push(postHeader);
+      dataBlock.push(entryBuffer);
+
+      // clear out memory
+      dataHeader = null;
+      postHeader = null;
+      entryBuffer = null;
+
+      // 4. construct entry header
+      const entryHeader = entryList[i].packHeader();
+      entryHeaders.push(entryHeader);
+      // 5. update main header
+      mainHeader.size += entryHeader.length;
+      totalSize += dataLength + entryHeader.length;
+
+      loopProgress = Math.round((((i + 1) / entryList.length) / 3) * 100);
+      group.progress = totalProgress + loopProgress;
+      progress$.next(group.progress);
+    }
+
+    totalProgress += loopProgress
+    loopProgress = 0;
+    totalSize += mainHeader.mainHeaderSize; // also includes zip file comment length
+    // point to end of data and beginning of central directory first record
+    mainHeader.offset = dindex;
+
+    dindex = 0;
+    let outBuffer: any = Buffer.alloc(totalSize);
+    // write data blocks
+    for (let i = 0; i < dataBlock.length; i++) {
+      dataBlock[i].copy(outBuffer, dindex);
+      dindex += dataBlock[i].length;
+
+      loopProgress = Math.round((((i + 1) / dataBlock.length) / 3) * 100);
+      group.progress = totalProgress + loopProgress;
+      progress$.next(group.progress);
+    }
+    totalProgress += loopProgress
+    loopProgress = 0;
+    // write central directory entries
+    for (let i = 0; i < entryHeaders.length; i++) {
+      entryHeaders[i].copy(outBuffer, dindex);
+      dindex += entryHeaders[i].length;
+
+      loopProgress = Math.round((((i + 1) / entryHeaders.length) / 3) * 100);
+      group.progress = totalProgress + loopProgress;
+      progress$.next(group.progress);
+    }
+
+    // write main header
+    const mh = mainHeader.toBinary();
+    mh.copy(outBuffer, dindex);
+
+    group.progress = 100;
+    progress$.next(group.progress);
+    file$.next(new Blob([outBuffer]));
+    outBuffer = null;
+  }
+
   newZipInstance() {
-    let entryList: any[] = [];
-    let entryTable: any = {};
-    let mainHeader = this.mainHeader();
-    let self = this;
+    const entryGroups: IEntryGroup[] = [];
+    const entryList: any[] = [];
+    const mainHeader = this.mainHeader();
+    const self = this;
+    const progress$: Subject<number> = new Subject();
+
 
     return {
-
-      /**
-       * Allows you to create a entry (file or directory) in the zip file.
-       * If you want to create a directory the entryName must end in / and a null buffer should be provided.
-       * Comment and attributes are optional
-       *
-       * @param {string} entryName
-       * @param {Buffer | string} content - file content as buffer or utf8 coded string
-       * @param {number | object} attr - number as unix file permissions, object as filesystem Stats object
-       */
       addFile: function (/**String*/ entryName: any, /**Buffer*/ buffer: any) {
         let entry = self.zipEntry();
         entry.entryName = entryName;
@@ -48,114 +143,32 @@ export class ZipService {
         entry.attr = fileattr;
         entry.setData(buffer);
         entryList.push(entry);
-        entryTable[entry.entryName] = entry;
+        const entryBufferLength = entry.getEntryBuffer().length;
+        entry.clearEntryBuffer(); // clear buffer is essential else browser will get out of memory if many files are added;
+        const groupToPushInto = entryGroups.find(group => group.size + entryBufferLength < splitThreshold);
+        if (!!groupToPushInto) {
+          groupToPushInto.size += entryBufferLength;
+          groupToPushInto.entries.push(entry);
+        } else {
+          entryGroups.push({ size: entryBufferLength, entries: [entry], progress: 0 })
+        }
         mainHeader.totalEntries = entryList.length;
       },
-
-      /**
-       * Returns the zip file async-ly
-       */
-      getZipFileAsync(callback?: any) {
-        return new Promise<any>((resolve, reject) => {
-          if (!entryList.length) {
-            return resolve(null);
-          }
-          console.log(entryList);
-          self.sortEntries(entryList);
-
-          const dataBlock = [];
-          const entryHeaders = [];
-          let totalSize = 0;
-          let dindex = 0;
-
-          mainHeader.size = 0;
-          mainHeader.offset = 0;
-
-          let totalProgress = 0;
-          let loopProgress = 0;
-
-          for (let i = 0; i < entryList.length; i++) {
-            // compress data and set local and entry header accordingly. Reason why is called first
-            const entryBuffer = entryList[i].entryBuffer;
-            // 1. construct data header
-            entryList[i].header.offset = dindex;
-            const dataHeader = entryList[i].header.dataHeaderToBinary();
-            const entryNameLen = entryList[i].rawEntryName.length;
-            // 1.2. postheader - data after data header
-            const postHeader = Buffer.alloc(entryNameLen + entryList[i].extra.length);
-            entryList[i].rawEntryName.copy(postHeader, 0);
-            postHeader.copy(entryList[i].extra, entryNameLen);
-
-            // 2. offsets
-            const dataLength = dataHeader.length + postHeader.length + entryBuffer.length;
-            dindex += dataLength;
-
-            console.log(dataHeader);
-            console.log(postHeader);
-            console.log(entryBuffer);
-            console.log(dataLength);
-            console.log(dindex);
-            console.log('----')
-
-            // 3. store values in sequence
-            dataBlock.push(dataHeader);
-            dataBlock.push(postHeader);
-            dataBlock.push(entryBuffer);
-
-            // 4. construct entry header
-            const entryHeader = entryList[i].packHeader();
-            entryHeaders.push(entryHeader);
-            // 5. update main header
-            mainHeader.size += entryHeader.length;
-            totalSize += dataLength + entryHeader.length;
-
-            loopProgress = Math.round((((i + 1) / entryList.length) / 3) * 100);
-            if (!!callback) {
-              callback(totalProgress + loopProgress);
-            }
-          }
-
-          totalProgress += loopProgress
-          loopProgress = 0;
-          totalSize += mainHeader.mainHeaderSize; // also includes zip file comment length
-          // point to end of data and beginning of central directory first record
-          mainHeader.offset = dindex;
-
-          dindex = 0;
-          const outBuffer = Buffer.alloc(totalSize);
-          // write data blocks
-          for (let i = 0; i < dataBlock.length; i++) {
-            dataBlock[i].copy(outBuffer, dindex);
-            dindex += dataBlock[i].length;
-
-            loopProgress = Math.round((((i + 1) / dataBlock.length) / 3) * 100);
-            if (!!callback) {
-              callback(totalProgress + loopProgress);
-            }
-          }
-          totalProgress += loopProgress
-          loopProgress = 0;
-          // write central directory entries
-          for (let i = 0; i < entryHeaders.length; i++) {
-            entryHeaders[i].copy(outBuffer, dindex);
-            dindex += entryHeaders[i].length;
-
-            loopProgress = Math.round((((i + 1) / entryHeaders.length) / 3) * 100);
-            if (!!callback) {
-              callback(totalProgress + loopProgress);
-            }
-          }
-
-          // write main header
-          const mh = mainHeader.toBinary();
-          mh.copy(outBuffer, dindex);
-
-          if (!!callback) {
-            callback(100);
-          }
-          return resolve(new Blob([outBuffer]));
-        })
-      }
+      getZipFile$(file$: Subject<any>, callback?: any) {
+        if (!entryGroups.length) {
+          file$.complete();
+        }
+        if (!!callback) {
+          progress$.subscribe(() => {
+            const combinedProgress = entryGroups.reduce((total, current) => total += current.progress, 0);
+            callback(Math.round((combinedProgress / (entryGroups.length * 100)) * 100));
+          });
+        }
+        for (let i = 0; i < entryGroups.length; i++) {
+          self.makeZip(entryGroups[i], mainHeader, progress$, file$);
+          entryGroups[i] = { size: 0, entries: [], progress: 0 };
+        }
+      },
     };
   };
 
@@ -263,8 +276,15 @@ export class ZipService {
         return _isDirectory;
       },
 
-      get entryBuffer() {
-        return entryBuffer;
+      getEntryBuffer: function () {
+        entryBuffer = Buffer.alloc(uncompressedData.length);
+        _entryHeader.compressedSize = _entryHeader.size;
+        uncompressedData.copy(entryBuffer);
+        return entryBuffer
+      },
+
+      clearEntryBuffer: function () {
+        entryBuffer = null;
       },
 
       setData: function (value: any) {
@@ -273,9 +293,6 @@ export class ZipService {
         _entryHeader.method = Constants.STORED;
         _entryHeader.crc = Utils.crc32(value);
         _entryHeader.changed = true;
-        entryBuffer = Buffer.alloc(uncompressedData.length);
-        _entryHeader.compressedSize = _entryHeader.size;
-        uncompressedData.copy(entryBuffer);
       },
 
       getData: function (pass: any) {
